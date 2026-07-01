@@ -12,9 +12,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = os.getenv("SECRET_KEY")
 
 
-DEBUG = True
+DEBUG = False
 
-ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "*").split(",")
+
+ALLOWED_HOSTS = os.environ.get(
+    "ALLOWED_HOSTS", "social-media-app-18r4.onrender.com"
+).split(",")
 # -------------------------
 # APPLICATIONS
 # -------------------------
