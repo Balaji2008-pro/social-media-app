@@ -52,6 +52,7 @@ urlpatterns = [
     path('post/<int:post_id>/view/',    views.postviewhandler),
     path('post/<int:post_id>/viewers/', views.postviewershandler),
     path('sorthometown/', views.sorthometown),
+    path('user-friends/<int:user_id>/', views.get_user_friends),
 
 ]
 

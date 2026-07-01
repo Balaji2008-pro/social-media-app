@@ -5,10 +5,12 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.db.models import Count, Exists, OuterRef
-from django.core.paginator import Paginator  # ✅ PAGINATION
+from django.core.paginator import Paginator  
+from django.db.models import Q
 import os
 from django.db.models import Count, Exists, OuterRef, Prefetch
-
+import ffmpeg        
+import tempfile      
 from api.models import User
 from .models import (
     Profilemodel,
@@ -29,6 +31,10 @@ from .serializers import (
     Postserializer,
     Commentserializer
 )
+
+# views.py மேலே இந்த import சேர்க்கவும்
+import uuid
+
 
 # =========================================
 # LOGIN / AUTO REGISTER
@@ -76,7 +82,6 @@ def userlogin(request):
 # =========================================
 # PROFILE
 # =========================================
-
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def profilehandle(request):
@@ -84,44 +89,36 @@ def profilehandle(request):
     if request.method == "GET":
         profile = Profilemodel.objects.filter(user=request.user).first()
         return Response({
-            "profile": request.build_absolute_uri(profile.profile.url)
-            if profile else None,
-            "bio": profile.bio if profile else None  
-
+            "profile": profile.profile.url if profile and profile.profile else None,
+            "bio": profile.bio if profile else None
         })
 
     image_file = request.FILES.get('profile')
-    bio        = request.data.get('bio')  # ✅ சேர்க்கு
+    bio = request.data.get('bio')
 
     if not image_file:
         return Response({"error": "No image provided"}, status=400)
+
+    ext = image_file.name.rsplit('.', 1)[-1].lower() if '.' in image_file.name else 'jpg'
+    image_file.name = f"{uuid.uuid4().hex}.{ext}"
 
     profile, created = Profilemodel.objects.get_or_create(user=request.user)
 
     if not created and profile.profile:
         try:
             profile.profile.storage.delete(profile.profile.name)
-
         except Exception:
             pass
 
     profile.profile = image_file
-    
-    if bio is not None:    # ✅ சேர்க்கு
-       profile.bio = bio  # ✅ சேர்க்கு
-
+    if bio is not None:
+        profile.bio = bio
     profile.save()
 
-
     return Response({
-        "profile": request.build_absolute_uri(profile.profile.url),
-        "bio": profile.bio  
-
+        "profile": profile.profile.url if profile and profile.profile else None,
+        "bio": profile.bio
     })
-
-# =========================================
-# POSTS  ✅ PAGINATION
-# =========================================
 
 # =========================================
 # posthandler — FIXED (N+1 Query Fix)
@@ -133,9 +130,6 @@ def profilehandle(request):
 @permission_classes([IsAuthenticated])
 def posthandler(request):
 
-    # =========================
-    # GET — pagination + N+1 fix + is_liked fix
-    # =========================
     if request.method == "GET":
 
         page      = int(request.GET.get('page', 1))
@@ -153,12 +147,21 @@ def posthandler(request):
             ).values_list('post_id', flat=True)
         )
 
-        # ✅ FIX: 'user__profilemodel' (OneToOneField reverse — 'profilemodel_set' இல்லை)
         all_posts = Post.objects.select_related('user').annotate(
             likes_count=Count('likes', distinct=True),
 
             follow_count=Count('user__followers', distinct=True),
             views_count=Count('views', distinct=True),
+
+            friend_count=Count(
+                'user__sent_requests',
+                filter=Q(user__sent_requests__status='accepted'),
+                distinct=True
+            ) + Count(
+                'user__received_requests',
+                filter=Q(user__received_requests__status='accepted'),
+                distinct=True
+            ),
 
         ).prefetch_related(
 
@@ -224,7 +227,7 @@ def posthandler(request):
             data.append({
                 "id":           p.id,
                 "title":        p.title,
-                "post":         request.build_absolute_uri(p.post.url),
+                "post":         p.post.url,
                 "media_type":   p.media_type,
                 "user_id":      p.user.id,
                 "username":     p.user.username,
@@ -238,7 +241,9 @@ def posthandler(request):
                     profile.profile.url
                 ) if profile and profile.profile else None,
                 "bio":profile.bio if profile else None,
-                "views": p.views_count, 
+                "views": p.views_count,
+                "friend_count": p.friend_count, 
+ 
 
             })
 
@@ -259,41 +264,94 @@ def posthandler(request):
     media_file = request.FILES.get('post')
     media_type = 'image'
 
-    if media_file:
-        name = media_file.name.lower()
-        if name.endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp')):
-            media_type = 'video'
+    if not media_file:
+        return Response({'error': 'Media required'}, status=400)
 
-    serializer = Postserializer(data=request.data)
+    name = media_file.name.lower()
+    is_video = name.endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'))
 
-    if serializer.is_valid():
+    if is_video:
+        media_type = 'video'
 
-        obj = serializer.save(user=request.user, media_type=media_type)
+        # ✅ Step 1: Temp File-ல Save பண்ணு
+        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp_input:
+            for chunk in media_file.chunks():
+                tmp_input.write(chunk)
+            input_path = tmp_input.name
 
-        profile = Profilemodel.objects.filter(user=request.user).first()
+        output_path = input_path.replace('.mp4', '_compressed.mp4')
 
-        return Response({
-            "id":           obj.id,
-            "title":        obj.title,
-            "post":         request.build_absolute_uri(obj.post.url),
-            "media_type":   obj.media_type,
-            "user_id":      obj.user.id,
-            "username":     obj.user.username,
-            "likes":        0,
-            "is_liked":     False,
-            "followcount":  Follow.objects.filter(following=request.user).count(),
-            "likedusers":   [],
-            "created_at":   obj.created_at.isoformat(),
-            "is_following": False,
-            "profile":      request.build_absolute_uri(
-                profile.profile.url
-            ) if profile and profile.profile else None,
-            "bio": profile.bio if profile else None, 
+        try:
+            # ✅ Step 2: FFmpeg Compress பண்ணு
+            (
+                ffmpeg
+                .input(input_path)
+                .output(
+                    output_path,
+                    vcodec='libx264',
+                    crf=28,
+                    preset='fast',
+                    acodec='aac',
+                    movflags='faststart'
+                )
+                .run(overwrite_output=True, quiet=True)
+            )
 
-        })
+            # ✅ Step 3: Compressed File-ஐ Django File-ஆ மாத்து
+            from django.core.files import File
+            unique_name = f"{uuid.uuid4().hex}.mp4"
 
-    return Response(serializer.errors, status=400)
+            with open(output_path, 'rb') as f:
+                compressed_file = File(f, name=unique_name)
 
+                # ✅ Request Data-ல Replace பண்ணு
+                request._files['post'] = compressed_file
+
+                serializer = Postserializer(data=request.data)
+                if serializer.is_valid():
+                    obj = serializer.save(user=request.user, media_type=media_type)
+                else:
+                    return Response(serializer.errors, status=400)
+
+        finally:
+            # ✅ Step 4: Temp Files Delete பண்ணு
+            if os.path.exists(input_path):
+                os.unlink(input_path)
+            if os.path.exists(output_path):
+                os.unlink(output_path)
+
+    else:
+        # ✅ Image-ஆ இருந்தா Compress தேவையில்ல
+        media_type = 'image'
+        ext = name.rsplit('.', 1)[-1] if '.' in name else 'jpg'
+        media_file.name = f"{uuid.uuid4().hex}.{ext}"
+
+        serializer = Postserializer(data=request.data)
+        if serializer.is_valid():
+            obj = serializer.save(user=request.user, media_type=media_type)
+        else:
+            return Response(serializer.errors, status=400)
+
+    profile = Profilemodel.objects.filter(user=request.user).first()
+
+    return Response({
+        "id":           obj.id,
+        "title":        obj.title,
+        "post":         obj.post.url,
+        "media_type":   obj.media_type,
+        "user_id":      obj.user.id,
+        "username":     obj.user.username,
+        "likes":        0,
+        "is_liked":     False,
+        "followcount":  Follow.objects.filter(following=request.user).count(),
+        "likedusers":   [],
+        "created_at":   obj.created_at.isoformat(),
+        "is_following": False,
+        "profile":      request.build_absolute_uri(
+            profile.profile.url
+        ) if profile and profile.profile else None,
+        "bio": profile.bio if profile else None,
+    })
 
 # =========================================
 # likeshandler — FIXED (N+1 fix + is_liked + limit)
@@ -332,9 +390,9 @@ def likeshandler(request, post_id):
         profile = getattr(like.user, 'prefetched_profile', None)
         liked_users.append({
             "username": like.user.username,
-            "profile":  request.build_absolute_uri(
-                profile.profile.url
-            ) if profile and profile.profile else None
+            "profile":  profile.profile.url if profile and profile.profile else None  # ✅
+
+               
         })
 
     return Response({
@@ -442,9 +500,8 @@ def commenthandler(request, post_id):
                 "text":       c.text,
                 "username":   c.user.username,
                 "created_at": c.created_at.isoformat(),
-                "profile":    request.build_absolute_uri(
-                    profile.profile.url
-                ) if profile and profile.profile else None
+                "profile":    profile.profile.url if profile and profile.profile else None  # ✅
+
             })
 
         return Response({
@@ -509,25 +566,7 @@ def deletepost(request, post_id):
     post.delete()
     return Response({"message": "Post deleted successfully"})
 
-# =========================================
-# SORT USERS  ✅ PAGINATION + related_name FIX
-# =========================================
 
-# =========================================
-# sorthandler — FIXED
-# views.py-ல் இந்த function மட்டும் replace பண்ணவும்
-#
-# Import add பண்ணவும் (இல்லை என்றால்):
-# from django.db.models import Count, Prefetch
-# =========================================
-
-# =========================================
-# sorthandler — FIXED (OneToOneField prefetch corrected)
-# views.py-ல் இந்த function மட்டும் replace பண்ணவும்
-#
-# Import add பண்ணவும் (இல்லை என்றால்):
-# from django.db.models import Count, Prefetch
-# =========================================
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -536,9 +575,6 @@ def sorthandler(request):
     page_number = int(request.query_params.get('page', 1))
     page_size   = int(request.query_params.get('page_size', 20))
 
-    # ✅ N+1 FIX — prefetch_related
-    # ✅ FIX: Profilemodel.user OneToOneField → reverse accessor = 'profilemodel'
-    #         ('profilemodel_set' இல்லை — அது ForeignKey-க்கு மட்டும்)
     users_qs = User.objects.annotate(
         followers_count=Count('followers', distinct=True)
     ).prefetch_related(
@@ -956,14 +992,61 @@ def reelhandler(request):
     # =========================================
     # POST REEL
     # =========================================
+   # =========================================
+    # POST REEL
+    # =========================================
     title = request.data.get('title')
     media = request.FILES.get('media')
 
     if not title or not media:
         return Response({'error': 'Title and media required'}, status=400)
 
-    reel = Reel.objects.create(user=request.user, title=title, media=media)
+    name = media.name.lower()
+    is_video = name.endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'))
 
+    if is_video:
+        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp_input:
+            for chunk in media.chunks():
+                tmp_input.write(chunk)
+            input_path = tmp_input.name
+
+        output_path = input_path.replace('.mp4', '_compressed.mp4')
+
+        try:
+            (
+                ffmpeg
+                .input(input_path)
+                .output(
+                    output_path,
+                    vcodec='libx264',
+                    crf=28,
+                    preset='fast',
+                    acodec='aac',
+                    movflags='faststart'
+                )
+                .run(overwrite_output=True, quiet=True)
+            )
+
+            from django.core.files import File
+            unique_name = f"{uuid.uuid4().hex}.mp4"
+
+            with open(output_path, 'rb') as f:
+                django_file = File(f, name=unique_name)
+                reel = Reel.objects.create(
+                    user=request.user,
+                    title=title,
+                    media=django_file
+                )
+
+        finally:
+            if os.path.exists(input_path):
+                os.unlink(input_path)
+            if os.path.exists(output_path):
+                os.unlink(output_path)
+
+    else:
+        media.name = f"{uuid.uuid4().hex}.{name.rsplit('.', 1)[-1]}"
+        reel = Reel.objects.create(user=request.user, title=title, media=media)
     profile = Profilemodel.objects.filter(user=request.user).first()
 
     return Response({
@@ -1115,7 +1198,6 @@ def postviewershandler(request, post_id):
     page      = int(request.GET.get('page', 1))
     page_size = int(request.GET.get('page_size', 20))
  
-    # ✅ N+1 FIX — select_related + prefetch (OneToOneField pattern)
     viewers_qs = PostView.objects.filter(post=post).select_related(
         'user'
     ).prefetch_related(
@@ -1201,7 +1283,7 @@ def sorthometown(request):
             "profile":      request.build_absolute_uri(
                 profile.profile.url
             ) if profile and profile.profile else None,
-            "bio": profile.bio if profile else None,  # ✅ சேர்க்கு
+            "bio": profile.bio if profile else None,  
 
         })
 
@@ -1216,3 +1298,84 @@ def sorthometown(request):
         }
     })
     
+    
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_user_friends(request, user_id):
+    target = get_object_or_404(User, id=user_id)
+
+    page      = int(request.GET.get('page', 1))
+    page_size = int(request.GET.get('page_size', 20))
+
+    sent = FriendRequest.objects.filter(
+        sender=target, status='accepted'
+    ).select_related('receiver').prefetch_related(
+        Prefetch(
+            'receiver__profilemodel',
+            queryset=Profilemodel.objects.only('user_id', 'profile', 'bio'),
+            to_attr='prefetched_profile'
+        )
+    )
+
+    received = FriendRequest.objects.filter(
+        receiver=target, status='accepted'
+    ).select_related('sender').prefetch_related(
+        Prefetch(
+            'sender__profilemodel',
+            queryset=Profilemodel.objects.only('user_id', 'profile', 'bio'),
+            to_attr='prefetched_profile'
+        )
+    )
+
+    data = []
+    seen = set()
+
+    for req in sent:
+        friend = req.receiver
+        if friend.id not in seen:
+            seen.add(friend.id)
+            profile = getattr(friend, 'prefetched_profile', None)
+            data.append({
+                'friend_id': friend.id,
+                'username':  friend.username,
+                'district':  friend.district,
+                'hometown':  friend.hometown,
+                'bio':       profile.bio if profile else None,
+                'profile':   request.build_absolute_uri(
+                    profile.profile.url
+                ) if profile and profile.profile else None,
+            })
+
+    for req in received:
+        friend = req.sender
+        if friend.id not in seen:
+            seen.add(friend.id)
+            profile = getattr(friend, 'prefetched_profile', None)
+            data.append({
+                'friend_id': friend.id,
+                'username':  friend.username,
+                'district':  friend.district,
+                'hometown':  friend.hometown,
+                'bio':       profile.bio if profile else None,
+                'profile':   request.build_absolute_uri(
+                    profile.profile.url
+                ) if profile and profile.profile else None,
+            })
+
+    # Pagination
+    total       = len(data)
+    start       = (page - 1) * page_size
+    end         = start + page_size
+    paged_data  = data[start:end]
+    total_pages = (total + page_size - 1) // page_size
+
+    return Response({
+        'results': paged_data,
+        'pagination': {
+            'current_page': page,
+            'total_pages':  total_pages,
+            'total_friends': total,
+            'has_next':     page < total_pages,
+            'has_previous': page > 1,
+        }
+    })

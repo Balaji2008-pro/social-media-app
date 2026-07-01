@@ -88,6 +88,8 @@ class FriendConsumer(AsyncWebsocketConsumer):
                     'type':              'friend_notification',
                     'action':            'request_accepted',
                     'request_id':        request_id,
+                    'sender_id':         result['sender_id'],  
+
                     'acceptor_username': result['acceptor_username'],
                     'acceptor_profile':  result['acceptor_profile'],
                     'message':           f"{result['acceptor_username']} accepted your friend request! 🎉"
