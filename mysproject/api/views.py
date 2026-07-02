@@ -1379,3 +1379,29 @@ def get_user_friends(request, user_id):
             'has_previous': page > 1,
         }
     })
+    
+    
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def send_friend_request(request, user_id):
+    target = get_object_or_404(User, id=user_id)
+
+    if target.id == request.user.id:
+        return Response({'error': 'Cannot add yourself'}, status=400)
+
+    existing = FriendRequest.objects.filter(sender=request.user, receiver=target).first()
+    if existing:
+        return Response({'status': existing.status, 'message': f'Already {existing.status}'}, status=200)
+
+    reverse = FriendRequest.objects.filter(sender=target, receiver=request.user).first()
+    if reverse and reverse.status == 'accepted':
+        return Response({'status': 'accepted', 'message': 'Already friends'}, status=200)
+    if reverse and reverse.status == 'pending':
+        # அவங்க ஏற்கனவே உங்களுக்கு request அனுப்பியிருந்தா, accept பண்ணுங்க
+        reverse.status = 'accepted'
+        reverse.save()
+        return Response({'status': 'accepted', 'message': 'Friend request accepted'}, status=200)
+
+    req = FriendRequest.objects.create(sender=request.user, receiver=target, status='pending')
+    return Response({'status': 'pending', 'request_id': req.id}, status=201)

@@ -53,6 +53,7 @@ urlpatterns = [
     path('post/<int:post_id>/viewers/', views.postviewershandler),
     path('sorthometown/', views.sorthometown),
     path('user-friends/<int:user_id>/', views.get_user_friends),
+    path('friend-send/<int:user_id>/', views.send_friend_request),
 
 ]
 
@@ -77,3 +78,9 @@ urlpatterns = [
 
 #start command 
 # daphne -b 0.0.0.0 -p $PORT mysproject.asgi:application
+
+
+
+
+
+# NpRLkAq4pXu2Lvf
