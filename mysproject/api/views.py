@@ -8,7 +8,7 @@ from django.db.models import Count, Exists, OuterRef
 from django.core.paginator import Paginator  
 from django.db.models import Q
 import os
-from django.db.models import Count, Exists, OuterRef, Prefetch
+from django.db.models import Count, Exists, OuterRef, Prefetch, Case, When, Value, IntegerField
 import ffmpeg        
 import tempfile      
 from api.models import User
@@ -32,9 +32,8 @@ from .serializers import (
     Commentserializer
 )
 
-# views.py மேலே இந்த import சேர்க்கவும்
 import uuid
-
+from .rate_limit import check_login_limit
 
 # =========================================
 # LOGIN / AUTO REGISTER
@@ -44,6 +43,10 @@ LIKED_USERS_LIMIT = 20
 
 @api_view(['POST'])
 def userlogin(request):
+    limit = check_login_limit()
+
+    if limit:
+        return limit
 
     username = request.data.get("username")
     password = request.data.get("password")
@@ -149,6 +152,7 @@ def posthandler(request):
 
         all_posts = Post.objects.select_related('user').annotate(
             likes_count=Count('likes', distinct=True),
+            comments_count=Count('comment', distinct=True),
 
             follow_count=Count('user__followers', distinct=True),
             views_count=Count('views', distinct=True),
@@ -242,7 +246,9 @@ def posthandler(request):
                 ) if profile and profile.profile else None,
                 "bio":profile.bio if profile else None,
                 "views": p.views_count,
-                "friend_count": p.friend_count, 
+                "friend_count": p.friend_count,
+                "comments": p.comments_count,  
+ 
  
 
             })
@@ -567,13 +573,19 @@ def deletepost(request, post_id):
     return Response({"message": "Post deleted successfully"})
 
 
-
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def sorthandler(request):
 
     page_number = int(request.query_params.get('page', 1))
     page_size   = int(request.query_params.get('page_size', 20))
+
+    # ✅ புதுசா சேர்க்கவும் — current user follow பண்ணி இருக்குறவங்களோட id set
+    following_ids = set(
+        Follow.objects.filter(
+            follower=request.user
+        ).values_list('following_id', flat=True)
+    )
 
     users_qs = User.objects.annotate(
         followers_count=Count('followers', distinct=True)
@@ -590,21 +602,19 @@ def sorthandler(request):
 
     data = []
     for u in page_obj.object_list:
-
-        # ✅ FIX: single object — list இல்லை, getattr safe access
         profile = getattr(u, 'prefetched_profile', None)
 
         data.append({
-            "user_id":   u.id,
-            "username":  u.username,
-            "district":  u.district,
-            "followers": u.followers_count,
-            "profile":   request.build_absolute_uri(
+            "user_id":      u.id,
+            "username":     u.username,
+            "district":     u.district,
+            "followers":    u.followers_count,
+            "profile":      request.build_absolute_uri(
                 profile.profile.url
             ) if profile and profile.profile else None,
-            "hometown":  u.hometown,  
-            "bio":profile.bio if profile else None
-
+            "hometown":     u.hometown,  
+            "bio":          profile.bio if profile else None,
+            "is_following": u.id in following_ids,     # ✅ புதுசா சேர்க்கவும்
         })
 
     return Response({
@@ -674,7 +684,6 @@ def You(request):
 # =========================================
 # SORTED WITH DISTRICT  ✅ PAGINATION + FIX
 # =========================================
-
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def sortedwithdistrict(request):
@@ -684,7 +693,13 @@ def sortedwithdistrict(request):
 
     district_q = request.query_params.get('district', '').strip()
 
-    # ✅ N+1 FIX + ✅ FIX: 'profilemodel' (OneToOneField reverse, 'profilemodel_set' இல்லை)
+    # ✅ புதுசா சேர்த்தது — current user follow பண்ணி இருக்குற ஆளுங்களோட id set
+    following_ids = set(
+        Follow.objects.filter(
+            follower=request.user
+        ).values_list('following_id', flat=True)
+    )
+
     users_qs = User.objects.annotate(
         follow_count=Count('followers', distinct=True)
     ).prefetch_related(
@@ -703,11 +718,10 @@ def sortedwithdistrict(request):
 
     data = []
     for u in page_obj.object_list:
-
-        # ✅ FIX: single object — getattr safe access
         profile = getattr(u, 'prefetched_profile', None)
 
         data.append({
+            "user_id":      u.id,                       # ✅ புதுசா சேர்த்தது
             "username":     u.username,
             "district":     u.district or "Unknown",
             "follow_count": u.follow_count,
@@ -715,8 +729,8 @@ def sortedwithdistrict(request):
                 profile.profile.url
             ) if profile and profile.profile else None,
             "hometown": u.hometown or "Unknown",
-            "bio": profile.bio if profile else None 
-
+            "bio": profile.bio if profile else None,
+            "is_following": u.id in following_ids,      # ✅ புதுசா சேர்த்தது
         })
 
     return Response({
@@ -917,7 +931,6 @@ def get_sent_requests(request):
 # Import add பண்ணவும் (இல்லை என்றால்):
 # from django.db.models import Count, Exists, OuterRef, Prefetch
 # =========================================
-
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def reelhandler(request):
@@ -937,28 +950,51 @@ def reelhandler(request):
             ).values_list('following_id', flat=True)
         )
 
+        # ✅ PRIORITY LOGIC — hometown → district → following → எல்லாம்
+        my_hometown = request.user.hometown
+        my_district = request.user.district
+
+        priority_conditions = []
+
+        if my_hometown:
+            priority_conditions.append(
+                When(user__hometown=my_hometown, then=Value(0))
+            )
+        if my_district:
+            priority_conditions.append(
+                When(user__district=my_district, then=Value(1))
+            )
+        priority_conditions.append(
+            When(user_id__in=following_ids, then=Value(2))
+        )
+
+        priority_case = Case(
+            *priority_conditions,
+            default=Value(3),
+            output_field=IntegerField()
+        )
+
         # ✅ FIX: 'user__profilemodel' (OneToOneField reverse — 'profilemodel_set' இல்லை)
         reels_qs = Reel.objects.select_related('user').annotate(
             likes_count=Count('likes', distinct=True),
             comments_count=Count('comments', distinct=True),
             is_liked=Exists(user_like),
             followers_count=Count('user__followers', distinct=True),
+            priority=priority_case,
         ).prefetch_related(
             Prefetch(
                 'user__profilemodel',
                 queryset=Profilemodel.objects.only('user_id', 'profile'),
                 to_attr='prefetched_profile'
             )
-        ).order_by('-created_at')
+        ).order_by('priority', '-created_at')
 
         paginator = Paginator(reels_qs, page_size)
         page_obj  = paginator.get_page(page_number)
 
         data = []
         for r in page_obj.object_list:
-            # ✅ FIX: single object — getattr safe access
             profile = getattr(r.user, 'prefetched_profile', None)
-
             is_following = r.user.id in following_ids
 
             data.append({
@@ -989,64 +1025,27 @@ def reelhandler(request):
             }
         })
 
-    # =========================================
-    # POST REEL
-    # =========================================
-   # =========================================
-    # POST REEL
-    # =========================================
-    title = request.data.get('title')
-    media = request.FILES.get('media')
+    # =========================
+    # POST — Reel Upload (✅ புதுசா சேர்த்தது)
+    # =========================
+    title      = request.data.get('title', '').strip()
+    media_file = request.FILES.get('media')
 
-    if not title or not media:
-        return Response({'error': 'Title and media required'}, status=400)
+    if not title:
+        return Response({'error': 'Title is required'}, status=400)
 
-    name = media.name.lower()
-    is_video = name.endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'))
+    if not media_file:
+        return Response({'error': 'Media file is required'}, status=400)
 
-    if is_video:
-        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp_input:
-            for chunk in media.chunks():
-                tmp_input.write(chunk)
-            input_path = tmp_input.name
+    ext = media_file.name.rsplit('.', 1)[-1].lower() if '.' in media_file.name else 'mp4'
+    media_file.name = f"{uuid.uuid4().hex}.{ext}"
 
-        output_path = input_path.replace('.mp4', '_compressed.mp4')
+    reel = Reel.objects.create(
+        user=request.user,
+        title=title,
+        media=media_file
+    )
 
-        try:
-            (
-                ffmpeg
-                .input(input_path)
-                .output(
-                    output_path,
-                    vcodec='libx264',
-                    crf=28,
-                    preset='fast',
-                    acodec='aac',
-                    movflags='faststart'
-                )
-                .run(overwrite_output=True, quiet=True)
-            )
-
-            from django.core.files import File
-            unique_name = f"{uuid.uuid4().hex}.mp4"
-
-            with open(output_path, 'rb') as f:
-                django_file = File(f, name=unique_name)
-                reel = Reel.objects.create(
-                    user=request.user,
-                    title=title,
-                    media=django_file
-                )
-
-        finally:
-            if os.path.exists(input_path):
-                os.unlink(input_path)
-            if os.path.exists(output_path):
-                os.unlink(output_path)
-
-    else:
-        media.name = f"{uuid.uuid4().hex}.{name.rsplit('.', 1)[-1]}"
-        reel = Reel.objects.create(user=request.user, title=title, media=media)
     profile = Profilemodel.objects.filter(user=request.user).first()
 
     return Response({
@@ -1065,7 +1064,6 @@ def reelhandler(request):
         'is_following': False,
         'created_at':   reel.created_at.isoformat(),
     }, status=201)
-
 
 # =========================================
 # LIKE / UNLIKE — மாற்றம் இல்லை
@@ -1246,7 +1244,6 @@ def postviewershandler(request, post_id):
         }
     })
  
- 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def sorthometown(request):
@@ -1255,6 +1252,13 @@ def sorthometown(request):
     page_size   = int(request.query_params.get('page_size', 20))
 
     hometown_q = request.query_params.get('hometown', '').strip()
+
+    # ✅ புதுசா சேர்த்தது — current user follow பண்ணி இருக்குற ஆளுங்களோட id set
+    following_ids = set(
+        Follow.objects.filter(
+            follower=request.user
+        ).values_list('following_id', flat=True)
+    )
 
     users_qs = User.objects.annotate(
         follow_count=Count('followers', distinct=True)
@@ -1276,6 +1280,7 @@ def sorthometown(request):
     for u in page_obj.object_list:
         profile = getattr(u, 'prefetched_profile', None)
         data.append({
+            "user_id":      u.id,                        # ✅ புதுசா சேர்த்தது
             "username":     u.username,
             "district":     u.district or "Unknown",
             "hometown":     u.hometown or "Unknown",
@@ -1283,8 +1288,8 @@ def sorthometown(request):
             "profile":      request.build_absolute_uri(
                 profile.profile.url
             ) if profile and profile.profile else None,
-            "bio": profile.bio if profile else None,  
-
+            "bio": profile.bio if profile else None,
+            "is_following": u.id in following_ids,       # ✅ புதுசா சேர்த்தது
         })
 
     return Response({
