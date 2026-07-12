@@ -173,3 +173,28 @@ else:
 import sys
 print("CLOUDFRONT_URL:", os.getenv("CLOUDFRONT_URL"), file=sys.stderr)
 print("AWS_BUCKET:", os.getenv("AWS_STORAGE_BUCKET_NAME"), file=sys.stderr)
+
+
+# =========================================
+# FIREBASE ADMIN SDK — Push Notification
+# =========================================
+# =========================================
+# FIREBASE ADMIN SDK — Push Notification
+# =========================================
+import firebase_admin
+from firebase_admin import credentials
+
+# ✅ Render-ல secret file இங்க இருக்கும்
+RENDER_SECRET_PATH = '/etc/secrets/firebase-credentials.json'
+# ✅ Local-ல file இங்க இருக்கும்
+LOCAL_CREDENTIALS_PATH = os.path.join(BASE_DIR, 'firebase-credentials.json')
+
+if not firebase_admin._apps:
+    if os.path.exists(RENDER_SECRET_PATH):
+        # Render production server
+        cred = credentials.Certificate(RENDER_SECRET_PATH)
+    else:
+        # Local development machine
+        cred = credentials.Certificate(LOCAL_CREDENTIALS_PATH)
+
+    firebase_admin.initialize_app(cred)
