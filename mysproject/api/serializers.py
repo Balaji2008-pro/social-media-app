@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Profilemodel, Post, Comment
+from .models import Profilemodel, Post, Comment, FCMToken
 from api.models import User
 
 class UserSerializer(serializers.ModelSerializer):
@@ -53,3 +53,10 @@ class Commentserializer(serializers.ModelSerializer):
         if profile:
             return self.context['request'].build_absolute_uri(profile.profile.url)
         return None
+    
+
+class FCMTokenSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = FCMToken
+        fields = ['id', 'token', 'device_id']
+        read_only_fields = ['id']

@@ -22,14 +22,16 @@ from .models import (
     Reel,
     ReelLike,
     ReelComment,
-    PostView
+    PostView,
+    FCMToken          
 )
 
 from .serializers import (
     UserSerializer,
     Profileserializer,
     Postserializer,
-    Commentserializer
+    Commentserializer,
+    FCMTokenSerializer   
 )
 
 import uuid
@@ -1410,3 +1412,41 @@ def send_friend_request(request, user_id):
 
     req = FriendRequest.objects.create(sender=request.user, receiver=target, status='pending')
     return Response({'status': 'pending', 'request_id': req.id}, status=201)
+
+
+
+# =========================================
+# FCM TOKEN — SAVE / UPDATE
+# =========================================
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def save_fcm_token(request):
+    """
+    RN app-ல இருந்து FCM token வந்தா, இங்க save பண்றோம்.
+    ஒரே token வேற user-க்கு already இருந்தா, அதை இந்த user-க்கு
+    மாத்திடறோம் (device share ஆகலாம் — logout/login scenario).
+    """
+    token = request.data.get('token')
+    device_id = request.data.get('device_id', '')
+
+    if not token:
+        return Response({'error': 'Token is required'}, status=400)
+
+    # ✅ இந்த token ஏற்கனவே DB-ல இருக்கான்னு பாருங்க
+    existing = FCMToken.objects.filter(token=token).first()
+
+    if existing:
+        # Token already இருந்தா, அதை இந்த user-க்கு update பண்ணுங்க
+        existing.user = request.user
+        existing.device_id = device_id
+        existing.save()
+        return Response({'message': 'Token updated successfully'})
+
+    # ✅ புது token-ஆ இருந்தா, create பண்ணுங்க
+    FCMToken.objects.create(
+        user=request.user,
+        token=token,
+        device_id=device_id
+    )
+    return Response({'message': 'Token saved successfully'}, status=201)

@@ -54,6 +54,8 @@ urlpatterns = [
     path('sorthometown/', views.sorthometown),
     path('user-friends/<int:user_id>/', views.get_user_friends),
     path('friend-send/<int:user_id>/', views.send_friend_request),
+    path('save-fcm-token/', views.save_fcm_token, name='save_fcm_token'),
+
 
 ]
 
