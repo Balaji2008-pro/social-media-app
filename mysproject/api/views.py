@@ -36,13 +36,44 @@ from .serializers import (
 
 import uuid
 from .rate_limit import check_login_limit
-
+from firebase_admin import messaging as fcm_messaging
+from .models import FCMToken
 # =========================================
 # LOGIN / AUTO REGISTER
 # =========================================
 LIKED_USERS_LIMIT = 20
 
+# =========================================
+# PUSH NOTIFICATION HELPER
+# =========================================
 
+def send_push_notification_to_all_except(exclude_user_id, title, body):
+    """
+    exclude_user_id தவிர, மத்த எல்லா users-க்கும் notification அனுப்றது.
+    """
+    tokens = list(
+        FCMToken.objects.exclude(user_id=exclude_user_id).values_list('token', flat=True)
+    )
+
+    if not tokens:
+        return
+
+    message = fcm_messaging.MulticastMessage(
+        notification=fcm_messaging.Notification(
+            title=title,
+            body=body,
+        ),
+        tokens=tokens,
+    )
+
+    try:
+        response = fcm_messaging.send_each_for_multicast(message)
+        print(f"Notifications sent: {response.success_count}, Failed: {response.failure_count}")
+    except Exception as e:
+        print(f"Push notification error: {e}")
+        
+        
+        
 @api_view(['POST'])
 def userlogin(request):
     limit = check_login_limit()
@@ -339,6 +370,13 @@ def posthandler(request):
             obj = serializer.save(user=request.user, media_type=media_type)
         else:
             return Response(serializer.errors, status=400)
+
+    # ✅ புதுசா சேர்த்தது — Post owner தவிர மத்த எல்லாருக்கும் notification அனுப்பு
+    send_push_notification_to_all_except(
+        exclude_user_id=request.user.id,
+        title="Hypeza",
+        body=f"{request.user.username} uploaded a new post 🔥"
+    )
 
     profile = Profilemodel.objects.filter(user=request.user).first()
 
