@@ -1086,6 +1086,13 @@ def reelhandler(request):
         media=media_file
     )
 
+    # ✅ புதுசா சேர்த்தது — Reel owner தவிர மத்த எல்லாருக்கும் notification அனுப்பு
+    send_push_notification_to_all_except(
+        exclude_user_id=request.user.id,
+        title="Hypeza",
+        body=f"{request.user.username} uploaded a new reel 🎬"
+    )
+
     profile = Profilemodel.objects.filter(user=request.user).first()
 
     return Response({
