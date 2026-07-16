@@ -1,6 +1,7 @@
 from django.db import models
 from django.contrib.auth.models import AbstractUser
 
+
 class User(AbstractUser):
     district = models.CharField(max_length=50, null=True, blank=True)
     hometown = models.CharField(max_length=50, null=True, blank=True)  
@@ -145,3 +146,92 @@ class FCMToken(models.Model):
 
     def __str__(self):
         return f"{self.user.username} - {self.token[:20]}..."
+    
+    
+# =========================================
+# POLITICS — PARTY SYSTEM
+# =========================================
+
+class Party(models.Model):
+    creator      = models.ForeignKey(User, on_delete=models.CASCADE, related_name='created_parties')
+    party_name   = models.CharField(max_length=100)
+    leader_name  = models.CharField(max_length=100)
+    symbol       = models.ImageField(upload_to='party_symbols/')
+    description  = models.TextField(blank=True, null=True)
+    district     = models.CharField(max_length=50, blank=True, null=True)
+    created_at   = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.party_name} (Leader: {self.leader_name})"
+
+
+class PartyMembership(models.Model):
+
+    ROLE_CHOICES = [
+        ('member', 'Member'),
+        ('secretary', 'Secretary'),
+        ('vice_president', 'Vice President'),
+    ]
+
+    user       = models.OneToOneField(User, on_delete=models.CASCADE, related_name='party_membership')
+    party      = models.ForeignKey(Party, on_delete=models.CASCADE, related_name='members')
+    role       = models.CharField(max_length=20, choices=ROLE_CHOICES, default='member')
+    joined_at  = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.user.username} joined {self.party.party_name} as {self.role}"
+    
+    
+    
+class PartyAnnouncement(models.Model):
+    party      = models.ForeignKey(Party, on_delete=models.CASCADE, related_name='announcements')
+    author     = models.ForeignKey(User, on_delete=models.CASCADE, related_name='party_announcements')
+    content    = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.party.party_name}: {self.content[:30]}"
+    
+    
+    
+# =========================================
+# RECSYS MODELS — உங்க models.py கடைசில add பண்ணவும்
+# =========================================
+
+
+
+# ✅ 1) REEL VIEW — watch tracking (like இல்லனாலும் view = weak signal)
+class ReelView(models.Model):
+    user        = models.ForeignKey(User, on_delete=models.CASCADE)
+    reel        = models.ForeignKey(Reel, on_delete=models.CASCADE, related_name='views')
+    watch_ratio = models.FloatField(default=0.0)   # 0.0 to 1.0 — எவ்வளவு % பாத்தாங்க
+    created_at  = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('user', 'reel')   # ஒரு user ஒரு reel-க்கு ஒரு record மட்டும் (update ஆகும்)
+
+    def __str__(self):
+        return f"{self.user.username} watched reel #{self.reel.id} ({self.watch_ratio*100:.0f}%)"
+
+
+# ✅ 2) PRECOMPUTED RECOMMENDATIONS — training script இதை fill பண்ணும்
+#     reelhandler இதை படிச்சு serve பண்ணும் (real-time-ல model run பண்ண வேண்டாம்)
+class ReelRecommendation(models.Model):
+    user       = models.ForeignKey(User, on_delete=models.CASCADE, related_name='reel_recommendations')
+    reel       = models.ForeignKey(Reel, on_delete=models.CASCADE, related_name='recommended_to')
+    score      = models.FloatField()
+    rank       = models.IntegerField()   # 1 = top recommendation
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('user', 'reel')
+        indexes = [
+            models.Index(fields=['user', 'rank']),
+        ]
+        ordering = ['rank']
+
+    def __str__(self):
+        return f"{self.user.username} <- reel #{self.reel.id} (score={self.score:.3f}, rank={self.rank})"

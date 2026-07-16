@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Profilemodel, Post, Comment, FCMToken
+from .models import Profilemodel, Post, Comment, FCMToken,Party, PartyMembership, PartyAnnouncement
 from api.models import User
 
 class UserSerializer(serializers.ModelSerializer):
@@ -60,3 +60,43 @@ class FCMTokenSerializer(serializers.ModelSerializer):
         model = FCMToken
         fields = ['id', 'token', 'device_id']
         read_only_fields = ['id']
+        
+        
+# =========================================
+# PARTY SERIALIZERS
+# =========================================
+
+class PartySerializer(serializers.ModelSerializer):
+    members_count = serializers.SerializerMethodField()
+    creator_username = serializers.CharField(source='creator.username', read_only=True)
+    is_joined = serializers.SerializerMethodField()
+    is_verified = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Party
+        fields = [
+            'id', 'party_name', 'leader_name', 'symbol', 'description',
+            'district', 'created_at', 'creator_username', 'members_count', 'is_joined', 'is_verified'
+        ]
+        read_only_fields = ['id', 'created_at']
+
+    def get_members_count(self, obj):
+        return obj.members.count()
+
+    def get_is_joined(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            return obj.members.filter(user=request.user).exists()
+        return False
+
+    def get_is_verified(self, obj):
+        return obj.members.count() >= 100
+    
+    
+class PartyAnnouncementSerializer(serializers.ModelSerializer):
+    author_username = serializers.CharField(source='author.username', read_only=True)
+
+    class Meta:
+        model = PartyAnnouncement
+        fields = ['id', 'content', 'created_at', 'author_username']
+        read_only_fields = ['id', 'created_at']

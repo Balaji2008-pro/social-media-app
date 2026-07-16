@@ -1,1 +1,1 @@
-from .populate_posts import Command as PopulatePostsCommand  
+from .train_reel_recommender import Command as PopulatePostsCommand  

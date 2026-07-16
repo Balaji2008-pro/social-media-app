@@ -23,7 +23,12 @@ from .models import (
     ReelLike,
     ReelComment,
     PostView,
-    FCMToken          
+    FCMToken  ,
+    Party,             
+    PartyMembership,
+    PartyAnnouncement ,
+    ReelRecommendation, ReelView   
+              
 )
 
 from .serializers import (
@@ -31,7 +36,10 @@ from .serializers import (
     Profileserializer,
     Postserializer,
     Commentserializer,
-    FCMTokenSerializer   
+    FCMTokenSerializer  ,
+    PartySerializer  ,
+    PartyAnnouncementSerializer                         
+ 
 )
 
 import uuid
@@ -974,28 +982,39 @@ def get_sent_requests(request):
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def reelhandler(request):
-
+    
+        
     if request.method == 'GET':
-
+    
         page_number = int(request.query_params.get('page', 1))
         page_size   = int(request.query_params.get('page_size', 5))
-
+    
         user_like = ReelLike.objects.filter(
             reel=OuterRef('pk'), user=request.user
         )
-
+    
         following_ids = set(
             Follow.objects.filter(
                 follower=request.user
             ).values_list('following_id', flat=True)
         )
-
-        # ✅ PRIORITY LOGIC — hometown → district → following → எல்லாம்
+    
+        # ✅ புதுசா — ML recommendation-ல இருந்து இந்த user-க்கான reel_id -> rank map
+        ml_recs = dict(
+            ReelRecommendation.objects.filter(user=request.user)
+            .values_list('reel_id', 'rank')
+        )
+    
         my_hometown = request.user.hometown
         my_district = request.user.district
-
+    
         priority_conditions = []
-
+    
+        # ✅ ML recommended reels-ஐ எல்லாத்தையும் விட முன்னாடி காட்டு (priority 0)
+        if ml_recs:
+            priority_conditions.append(
+                When(id__in=list(ml_recs.keys()), then=Value(-1))
+            )
         if my_hometown:
             priority_conditions.append(
                 When(user__hometown=my_hometown, then=Value(0))
@@ -1007,14 +1026,13 @@ def reelhandler(request):
         priority_conditions.append(
             When(user_id__in=following_ids, then=Value(2))
         )
-
+    
         priority_case = Case(
             *priority_conditions,
             default=Value(3),
             output_field=IntegerField()
         )
-
-        # ✅ FIX: 'user__profilemodel' (OneToOneField reverse — 'profilemodel_set' இல்லை)
+    
         reels_qs = Reel.objects.select_related('user').annotate(
             likes_count=Count('likes', distinct=True),
             comments_count=Count('comments', distinct=True),
@@ -1028,15 +1046,15 @@ def reelhandler(request):
                 to_attr='prefetched_profile'
             )
         ).order_by('priority', '-created_at')
-
+    
         paginator = Paginator(reels_qs, page_size)
         page_obj  = paginator.get_page(page_number)
-
+    
         data = []
         for r in page_obj.object_list:
             profile = getattr(r.user, 'prefetched_profile', None)
             is_following = r.user.id in following_ids
-
+    
             data.append({
                 'id':           r.id,
                 'title':        r.title,
@@ -1052,8 +1070,9 @@ def reelhandler(request):
                 'is_liked':     r.is_liked,
                 'is_following': is_following,
                 'created_at':   r.created_at.isoformat(),
+                'is_recommended': r.id in ml_recs,   # ✅ optional — frontend-ல "For You" badge காட்ட
             })
-
+    
         return Response({
             "results": data,
             "pagination": {
@@ -1064,6 +1083,7 @@ def reelhandler(request):
                 "has_previous": page_obj.has_previous(),
             }
         })
+    
 
     # =========================
     # POST — Reel Upload (✅ புதுசா சேர்த்தது)
@@ -1112,6 +1132,30 @@ def reelhandler(request):
         'created_at':   reel.created_at.isoformat(),
     }, status=201)
 
+
+
+ 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def reel_view(request, reel_id):
+    """
+    frontend-ல reel active ஆகி 2-3 sec கழிச்சு call பண்ணணும்.
+    body: { "watch_ratio": 0.0 to 1.0 }
+    """
+    reel = get_object_or_404(Reel, id=reel_id)
+    watch_ratio = float(request.data.get('watch_ratio', 0.0))
+    watch_ratio = max(0.0, min(1.0, watch_ratio))   # clamp 0-1
+ 
+    obj, created = ReelView.objects.get_or_create(
+        user=request.user, reel=reel,
+        defaults={'watch_ratio': watch_ratio}
+    )
+    if not created and watch_ratio > obj.watch_ratio:
+        # அதே reel-ஐ மறுபடி பாத்தா, max watch_ratio மட்டும் வைச்சுக்குங்க
+        obj.watch_ratio = watch_ratio
+        obj.save(update_fields=['watch_ratio'])
+ 
+    return Response({'recorded': True})
 # =========================================
 # LIKE / UNLIKE — மாற்றம் இல்லை
 # =========================================
@@ -1495,3 +1539,282 @@ def save_fcm_token(request):
         device_id=device_id
     )
     return Response({'message': 'Token saved successfully'}, status=201)
+
+
+
+# =========================================
+# PARTY — LIST + CREATE
+# =========================================
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def partyhandler(request):
+
+    if request.method == "GET":
+
+        page      = int(request.GET.get('page', 1))
+        page_size = int(request.GET.get('page_size', 20))
+
+        parties_qs = Party.objects.select_related('creator').annotate(
+            members_count_annotated=Count('members', distinct=True)
+        ).order_by('-members_count_annotated', '-created_at')
+
+        paginator = Paginator(parties_qs, page_size)
+        page_obj  = paginator.get_page(page)
+
+        serializer = PartySerializer(
+            page_obj.object_list,
+            many=True,
+            context={'request': request}
+        )
+
+        return Response({
+            "results": serializer.data,
+            "pagination": {
+                "current_page": page,
+                "total_pages":  paginator.num_pages,
+                "total_parties": paginator.count,
+                "has_next":     page_obj.has_next(),
+                "has_previous": page_obj.has_previous(),
+            }
+        })
+
+    # =========================
+    # POST — Create Party
+    # =========================
+    party_name  = request.data.get('party_name', '').strip()
+    leader_name = request.data.get('leader_name', '').strip()
+    description = request.data.get('description', '')
+    district    = request.data.get('district', '')
+    symbol_file = request.FILES.get('symbol')
+
+    if not party_name or not leader_name:
+        return Response({'error': 'Party name and Leader name required'}, status=400)
+
+    if not symbol_file:
+        return Response({'error': 'Party symbol image required'}, status=400)
+
+    ext = symbol_file.name.rsplit('.', 1)[-1].lower() if '.' in symbol_file.name else 'jpg'
+    symbol_file.name = f"{uuid.uuid4().hex}.{ext}"
+
+    party = Party.objects.create(
+        creator=request.user,
+        party_name=party_name,
+        leader_name=leader_name,
+        symbol=symbol_file,
+        description=description,
+        district=district,
+    )
+
+    serializer = PartySerializer(party, context={'request': request})
+    return Response(serializer.data, status=201)
+
+
+# =========================================
+# PARTY — JOIN / LEAVE
+# =========================================
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def party_join_leave(request, party_id):
+
+    party = get_object_or_404(Party, id=party_id)
+
+    existing_membership = PartyMembership.objects.filter(user=request.user).first()
+
+    # ✅ Case 1: இந்த User ஏற்கனவே இந்த Party-லேயே இருந்தா → Leave பண்ணு
+    if existing_membership and existing_membership.party_id == party.id:
+        existing_membership.delete()
+        return Response({'joined': False, 'message': 'Left the party'})
+
+    # ✅ Case 2: இந்த User வேற Party-ல ஏற்கனவே இருந்தா → Error (ஒரு Party-ல மட்டும் join பண்ண முடியும்)
+    if existing_membership:
+        return Response({
+            'error': f'You are already a member of {existing_membership.party.party_name}. Leave first to join another party.'
+        }, status=400)
+
+    # ✅ Case 3: புதுசா Join பண்ணு
+    PartyMembership.objects.create(user=request.user, party=party)
+    return Response({'joined': True, 'message': f'Joined {party.party_name}'})
+
+
+# =========================================
+# PARTY — DELETE (Creator மட்டும்)
+# =========================================
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def party_delete(request, party_id):
+
+    party = get_object_or_404(Party, id=party_id, creator=request.user)
+
+    if party.symbol:
+        try:
+            party.symbol.storage.delete(party.symbol.name)
+        except Exception:
+            pass
+
+    party.delete()
+    return Response({'message': 'Party deleted successfully'})
+
+
+# =========================================
+# PARTY — EDIT (Creator மட்டும்)
+# =========================================
+
+@api_view(['PUT'])
+@permission_classes([IsAuthenticated])
+def party_edit(request, party_id):
+
+    party = get_object_or_404(Party, id=party_id, creator=request.user)
+
+    party.party_name  = request.data.get('party_name', party.party_name)
+    party.leader_name = request.data.get('leader_name', party.leader_name)
+    party.description = request.data.get('description', party.description)
+    party.district     = request.data.get('district', party.district)
+
+    symbol_file = request.FILES.get('symbol')
+    if symbol_file:
+        if party.symbol:
+            try:
+                party.symbol.storage.delete(party.symbol.name)
+            except Exception:
+                pass
+        ext = symbol_file.name.rsplit('.', 1)[-1].lower() if '.' in symbol_file.name else 'jpg'
+        symbol_file.name = f"{uuid.uuid4().hex}.{ext}"
+        party.symbol = symbol_file
+
+    party.save()
+
+    serializer = PartySerializer(party, context={'request': request})
+    return Response(serializer.data)
+
+
+# =========================================
+# PARTY — MEMBERS LIST
+# =========================================
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def party_members(request, party_id):
+
+    party = get_object_or_404(Party, id=party_id)
+
+    memberships = PartyMembership.objects.filter(party=party).select_related('user').order_by('-joined_at')
+
+    data = []
+    for m in memberships:
+        data.append({
+            'user_id': m.user.id,
+            'username': m.user.username,
+            'role': m.role,
+            'role_display': m.get_role_display(),
+            'joined_at': m.joined_at.isoformat(),
+        })
+
+    return Response({
+        'party_name': party.party_name,
+        'total_members': len(data),
+        'is_creator': party.creator_id == request.user.id,
+        'members': data,
+    })
+    
+    
+# =========================================
+# PARTY — ASSIGN ROLE (Creator மட்டும்)
+# =========================================
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def party_assign_role(request, party_id, user_id):
+
+    party = get_object_or_404(Party, id=party_id, creator=request.user)
+
+    membership = get_object_or_404(PartyMembership, party=party, user_id=user_id)
+
+    new_role = request.data.get('role')
+
+    valid_roles = [choice[0] for choice in PartyMembership.ROLE_CHOICES]
+    if new_role not in valid_roles:
+        return Response({'error': 'Invalid role'}, status=400)
+
+    membership.role = new_role
+    membership.save()
+
+    return Response({
+        'message': f'{membership.user.username} is now {membership.get_role_display()}',
+        'role': membership.role,
+        'role_display': membership.get_role_display(),
+    })
+# =========================================
+# PARTY — ANNOUNCEMENTS (Members மட்டும்)
+# =========================================
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def party_announcements(request, party_id):
+
+    party = get_object_or_404(Party, id=party_id)
+
+    # ✅ Permission check — இந்த user, இந்த Party-ல் Member-ஆ இருக்கணும்
+    is_member = PartyMembership.objects.filter(user=request.user, party=party).exists()
+
+    if not is_member:
+        return Response({'error': 'Only members who have joined this party can view announcements'}, status=403)
+
+    if request.method == "GET":
+        announcements = PartyAnnouncement.objects.filter(party=party).select_related('author')
+        serializer = PartyAnnouncementSerializer(announcements, many=True)
+        return Response(serializer.data)
+
+    # =========================
+    # POST — Create Announcement
+    # =========================
+    content = request.data.get('content', '').strip()
+
+    if not content:
+        return Response({'error': 'Content is required'}, status=400)
+
+    announcement = PartyAnnouncement.objects.create(
+        party=party,
+        author=request.user,
+        content=content,
+    )
+
+    serializer = PartyAnnouncementSerializer(announcement)
+    return Response(serializer.data, status=201)
+
+
+
+# =========================================
+# PARTY — DISTRICT RANKING
+# =========================================
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def party_ranking(request):
+
+    district_q = request.query_params.get('district', '').strip()
+
+    parties_qs = Party.objects.select_related('creator').annotate(
+        members_count_annotated=Count('members', distinct=True)
+    ).order_by('-members_count_annotated', '-created_at')
+
+    if district_q:
+        parties_qs = parties_qs.filter(district__icontains=district_q)
+
+    serializer = PartySerializer(
+        parties_qs,
+        many=True,
+        context={'request': request}
+    )
+
+    # ✅ Rank number சேர்க்கிறோம் (1, 2, 3...)
+    data = serializer.data
+    for index, party in enumerate(data):
+        party['rank'] = index + 1
+
+    return Response({
+        'district': district_q or 'All Districts',
+        'total_parties': len(data),
+        'results': data,
+    })

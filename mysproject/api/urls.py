@@ -55,7 +55,18 @@ urlpatterns = [
     path('user-friends/<int:user_id>/', views.get_user_friends),
     path('friend-send/<int:user_id>/', views.send_friend_request),
     path('save-fcm-token/', views.save_fcm_token, name='save_fcm_token'),
-
+    
+    path('parties/', views.partyhandler),
+    path('parties/<int:party_id>/join/', views.party_join_leave),
+    path('parties/<int:party_id>/delete/', views.party_delete),
+    path('parties/<int:party_id>/edit/', views.party_edit),
+    path('parties/<int:party_id>/members/', views.party_members),
+    path('parties/<int:party_id>/members/<int:user_id>/role/', views.party_assign_role),
+   
+    path('parties/<int:party_id>/announcements/', views.party_announcements),
+    
+    path('parties-ranking/', views.party_ranking),
+    path('reels/<int:reel_id>/view/', views.reel_view),
 
 ]
 
