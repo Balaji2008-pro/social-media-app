@@ -15,14 +15,13 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 from api.models import User
 from api.models import Reel, ReelLike, ReelComment, ReelView, ReelRecommendation
-# ⚠️ 'yourapp' ஐ உங்க actual app name-ஆ மாத்தவும் (models.py இருக்கிற app)
 
 
 EMBED_DIM   = 32
 EPOCHS      = 15
 LR          = 0.01
-TOP_N       = 30          # ஒரு user-க்கு எவ்வளவு reels recommend பண்ணணும்
-MIN_INTERACTIONS = 1       # cold-start users skip
+TOP_N       = 30          
+MIN_INTERACTIONS = 1       
 
 
 # =========================================
