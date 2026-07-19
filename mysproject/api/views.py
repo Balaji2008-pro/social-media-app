@@ -1036,6 +1036,7 @@ def reelhandler(request):
         reels_qs = Reel.objects.select_related('user').annotate(
             likes_count=Count('likes', distinct=True),
             comments_count=Count('comments', distinct=True),
+            views_count=Count('views', distinct=True),   # 🆕 சேர்க்கவும்
             is_liked=Exists(user_like),
             followers_count=Count('user__followers', distinct=True),
             priority=priority_case,
@@ -1067,6 +1068,8 @@ def reelhandler(request):
                 'followers':    r.followers_count,
                 'likes':        r.likes_count,
                 'comments':     r.comments_count,
+                'views':        r.views_count,   # 🆕 சேர்க்கவும்
+
                 'is_liked':     r.is_liked,
                 'is_following': is_following,
                 'created_at':   r.created_at.isoformat(),
